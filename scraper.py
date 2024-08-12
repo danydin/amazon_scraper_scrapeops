@@ -1,9 +1,11 @@
+import time
 from dotenv import load_dotenv
 import requests
 import json, csv
 from dataclasses import dataclass, field, fields, asdict
 from bs4 import BeautifulSoup
 import logging, os
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,17 +63,44 @@ class DataPipeline:
         with open(self.csv_filename, mode="a", newline="", encoding="utf-8") as output_file:
             writer = csv.DictWriter(output_file, fieldnames=keys)
 
+            # if file not exists
             if not file_exists:
+                # columns keys
                 writer.writeheader()
 
+            for item in data_to_save:
+                writer.writerow(asdict(item))
 
-def search_products(product_name: str, page_number=1, retries=3):
+        self.csv_file_open = False
+
+    def is_duplicate(self, input_data):
+        if input_data.name in self.names_seen:
+            logger.warning(f"Duplicate item found: {input_data.name}. Item will not be added")
+            return True
+        self.names_seen.append(input_data.name)
+        return False
+    
+    def add_data(self, scraped_data):
+        if self.is_duplicate(scraped_data) == False:
+            self.storage_queue.append(scraped_data)
+            if len(self.storage_queue) >= self.storage_queue_limit and self.csv_file_open == False:
+                self.save_to_csv()
+    
+    def close_pipeline(self):
+        if self.csv_file_open:
+            time.sleep(3)
+
+        if len(self.storage_queue) > 0:
+            self.save_to_csv()
+
+
+
+def search_products(product_name: str, page_number=1, location="us", retries=3, data_pipeline=None):
     tries = 0
     success = False
 
     while tries < retries and not success:
         try:
-            print("test")
             url = f"https://amazon.com/s?k={product_name}&page={page_number}"
             resp = requests.get(url)
 
@@ -79,6 +108,11 @@ def search_products(product_name: str, page_number=1, retries=3):
                 logger.info("Successfully fetched page")
 
                 soup = BeautifulSoup(resp.text, "html.parser")
+
+                bad_divs = soup.find_all("div", class_="AdHolder")
+
+                for bad_div in bad_divs:
+                    bad_div.decompose()
 
                 divs = soup.find_all("div")
 
@@ -111,18 +145,18 @@ def search_products(product_name: str, page_number=1, retries=3):
                             real_price = float(prices[1].text.replace(pricing_unit,"").replace(",",""))
 
                         if symbol_presence and rating_present and price_present:
-                            product = {
-                                "name": asin,
-                                "title": title,
-                                "url": product_url,
-                                "is_ad": ad_status,
-                                "pricing_unit": pricing_unit,
-                                "price": price,
-                                "real_price": real_price,
-                                "rating": rating
-                            }
+                            product = ProductData(
+                                name = asin,
+                                title = title,
+                                url = product_url,
+                                is_ad= ad_status,
+                                pricing_unit=pricing_unit,
+                                price=price,
+                                real_price=real_price,
+                                rating=rating
+                            )
 
-                            print(product)
+                            data_pipeline.add_data(product)
 
                         last_title = title
                         
@@ -142,9 +176,33 @@ def search_products(product_name: str, page_number=1, retries=3):
 
     print(f"Exited scrape_products for: {product_name}")
 
+def threaded_search(product_name, pages, max_workers=5, location="us", retries=3):
+    search_pipeline = DataPipeline(csv_filename=f"{product_name}.csv")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                search_products, product_name, page, location, retries, search_pipeline
+            ) for page in range (1, pages+1)
+        ]
+
+        for future in futures:
+            future.result()
+
+    search_pipeline.close_pipeline()
+
 if __name__ == "__main__":
     PRODUCTS = ["phone"]
     MAX_RETRIES = 2
+    # used by threaded_search
+    PAGES = 5
+    MAX_THREADS = 3
+    LOCATION = "us"
 
     for product in PRODUCTS:
-        search_products(product, retries=MAX_RETRIES)
+        threaded_search(
+            product, PAGES, max_workers=MAX_THREADS, retries=MAX_RETRIES, location=LOCATION
+        )
+        # product_pipeline = DataPipeline(csv_filename=f"{product}.csv")
+        # search_products(product, retries=MAX_RETRIES, data_pipeline=product_pipeline)
+        # product_pipeline.close_pipeline()
