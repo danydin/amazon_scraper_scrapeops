@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, fields, asdict
 from bs4 import BeautifulSoup
 import logging, os
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlencode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class DataPipeline:
         if not data_to_save:
             return
         
-        keys = [field.name for field in fields(data_to_save[0])]
+        keys = [field.name for field in (data_to_save[0])]
         file_exists = os.path.isfile(self.csv_filename) and  os.path.getsize(self.csv_filename) > 0
 
         with open(self.csv_filename, mode="a", newline="", encoding="utf-8") as output_file:
@@ -93,6 +94,15 @@ class DataPipeline:
         if len(self.storage_queue) > 0:
             self.save_to_csv()
 
+# bypass amazon blocking
+def get_scrapeops_url(url, location="us"):
+    payload = {
+        "api_key": API_KEY_SECRET,
+        "url": url,
+        "country": location
+    }
+    proxy_url = "https://proxy.scrapeops.io/v1/?" + urlencode(payload)
+    return proxy_url
 
 
 def search_products(product_name: str, page_number=1, location="us", retries=3, data_pipeline=None):
@@ -101,7 +111,11 @@ def search_products(product_name: str, page_number=1, location="us", retries=3, 
 
     while tries < retries and not success:
         try:
-            url = f"https://amazon.com/s?k={product_name}&page={page_number}"
+            url = get_scrapeops_url(
+                f"https://amazon.com/s?k={product_name}&page={page_number}",
+                location=location
+            )
+            print(url)
             resp = requests.get(url)
 
             if resp.status_code == 200:
@@ -196,7 +210,7 @@ if __name__ == "__main__":
     MAX_RETRIES = 2
     # used by threaded_search
     PAGES = 5
-    MAX_THREADS = 3
+    MAX_THREADS = 1
     LOCATION = "us"
 
     for product in PRODUCTS:
